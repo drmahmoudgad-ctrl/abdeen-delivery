@@ -239,10 +239,6 @@ const DEFAULT_BRANCHES=[
 ];
 let branches=JSON.parse(localStorage.getItem("abdeen_branches")||"null")||DEFAULT_BRANCHES;
 let pricing=JSON.parse(localStorage.getItem("abdeen_pricing")||"null")||{baseKm:5,baseFee:15,extraFee:7,rounding:"ceil"};
-pricing.baseKm=Number.isFinite(Number(pricing.baseKm))&&Number(pricing.baseKm)>0?Number(pricing.baseKm):5;
-pricing.baseFee=Number.isFinite(Number(pricing.baseFee))&&Number(pricing.baseFee)>=0?Number(pricing.baseFee):15;
-pricing.extraFee=Number.isFinite(Number(pricing.extraFee))&&Number(pricing.extraFee)>=0?Number(pricing.extraFee):7;
-pricing.rounding=pricing.rounding||"ceil";
 let history=JSON.parse(localStorage.getItem("abdeen_history")||"[]");
 let currentResult=null;
 
@@ -287,15 +283,10 @@ function getBillingDistance(distance){
   return distance;
 }
 function calcFeeByBillingDistance(distance){
-  const km=Number(distance);
-  if(!Number.isFinite(km) || km<0) return null;
-  const d=getBillingDistance(km);
-  const baseKm=Number(pricing.baseKm);
-  const baseFee=Number(pricing.baseFee);
-  const extraFee=Number(pricing.extraFee);
-  return d<=baseKm
-    ?baseFee
-    :baseFee + ((d-baseKm)*extraFee);
+  const d=getBillingDistance(distance);
+  return d<=pricing.baseKm
+    ?pricing.baseFee
+    :pricing.baseFee + ((d-pricing.baseKm)*pricing.extraFee);
 }
 
 function calcFee(km){
@@ -308,18 +299,11 @@ async function valhallaRequest(path,payload){
   const res=await fetch("/api/route",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
+    cache:"no-store",
     body:JSON.stringify({path,payload})
   });
   const data=await res.json().catch(()=>({}));
-  if(!res.ok || data?.error) throw new Error(data?.error || ("HTTP_"+res.status));
-  return data;
-}
-
-async function osrmFallback(branch,loc,withShape=false){
-  // Kept as a browser-independent backup through the Vercel API.
-  const data=await valhallaRequest("/osrm",{
-    branch,loc,withShape
-  });
+  if(!res.ok || data?.error) throw new Error(data?.detail || data?.error || ("HTTP_"+res.status));
   return data;
 }
 
@@ -424,28 +408,19 @@ function routePayload(branch,loc,shapeFormat="no_shape"){
 }
 
 async function routeOneBranch(branch,loc,withShape=false){
-  const data=await valhallaRequest("/route",routePayload(branch,loc,withShape?"polyline6":"no_shape"));
-
-  // Backend returns a normalized OSRM fallback object when Valhalla is unavailable.
-  if(data?._fallback){
-    return {
-      ...data._fallback,
-      fallbackRouter:true,
-      routerName:data._fallback.routerName||"OSRM"
-    };
-  }
-
-  const summary=data?.trip?.summary;
-  if(!summary || summary.length==null) throw new Error("NO_ROUTE");
-
+  const data=await valhallaRequest("/route",{
+    branch,
+    loc,
+    withShape
+  });
+  if(data?.road==null) throw new Error("NO_ROUTE");
   return {
     ...branch,
-    road:+summary.length,
-    duration:summary.time!=null?+summary.time/60:null,
-    shape:withShape && data?.trip?.legs?.[0]?.shape
-      ?decodePolyline(data.trip.legs[0].shape,6):[],
-    fallbackRouter:false,
-    routerName:"Valhalla Motorcycle"
+    road:+data.road,
+    duration:data.duration!=null?+data.duration:null,
+    shape:Array.isArray(data.shape)?data.shape:[],
+    fallbackRouter:!!data.fallbackRouter,
+    routerName:data.routerName||"Routing"
   };
 }
 
@@ -461,48 +436,19 @@ async function calculateAllBranchFees(){
   $("allBranchesTable").innerHTML='<div class="empty">جاري حساب قيمة التوصيل من الفروع...</div>';
 
   const results=[];
-  // Use the matrix once where possible: one request instead of 10 route calls.
-  try{
-    const matrix=await valhallaRequest("/sources_to_targets",{
-      sources:branches.map(b=>({lat:b.lat,lon:b.lng,radius:1000})),
-      targets:[{lat:loc.lat,lon:loc.lng,radius:1000}],
-      costing:"motorcycle",
-      units:"kilometers",
-      verbose:true
-    });
-    const items=extractMatrixItems(matrix);
-    items.forEach(item=>{
-      if(item?.to_index!==0 || item.distance==null || item.from_index==null) return;
-      const b=branches[item.from_index];
-      if(!b) return;
-      results.push({
-        ...b,
-        road:+item.distance,
-        duration:item.time!=null?+item.time/60:null,
-        routerName:item.routerName||"Valhalla Motorcycle"
-      });
-    });
-  }catch(e){
-    console.warn("Matrix unavailable; calculating branches one by one.",e);
-  }
-
-  // If matrix was unavailable, try individual routes with a small pause.
-  if(results.length < branches.length){
-    const have=new Set(results.map(x=>x.name));
-    for(const b of branches){
-      if(have.has(b.name)) continue;
-      try{
-        const r=await routeOneBranch(b,loc,false);
-        results.push(r);
-      }catch(e){}
-      await new Promise(r=>setTimeout(r,180));
+  for(const b of branches){
+    try{
+      const r=await routeOneBranch(b,loc,false);
+      results.push(r);
+    }catch(e){
+      console.warn("Branch route failed:",b.name,e);
     }
   }
 
   allBranchResults=results.sort((a,b)=>a.road-b.road);
   if(!allBranchResults.length){
     $("allBranchesTable").innerHTML=
-      '<div style="color:var(--danger);font-size:13px">تعذر الحصول على مسافات الطريق من خدمة التوجيه المجانية الآن. جرّب مرة أخرى بعد لحظات.</div>';
+      '<div style="color:var(--danger);font-size:13px">تعذر الحصول على مسافات الطريق حاليًا. جرّب مرة أخرى بعد لحظات.</div>';
     return;
   }
 
@@ -554,35 +500,16 @@ async function calculateDelivery(){
       shape=routed.shape||[];
       duration=routed.duration;
     }else{
-      // Matrix is preferred: it compares all branches in one request.
-      try{
-        const matrix=await valhallaRequest("/sources_to_targets",{
-          sources:branches.map(b=>({lat:b.lat,lon:b.lng,radius:1000})),
-          targets:[{lat:loc.lat,lon:loc.lng,radius:1000}],
-          costing:"motorcycle",
-          units:"kilometers",
-          verbose:true
-        });
-        const items=extractMatrixItems(matrix);
-        items.forEach(item=>{
-          if(item?.to_index!==0 || item.distance==null || item.from_index==null) return;
-          const b=branches[item.from_index];
-          if(!b) return;
-          const candidate={...b,road:+item.distance,duration:item.time!=null?+item.time/60:null,routerName:item.routerName||"Valhalla Motorcycle"};
-          if(!nearest || candidate.road<nearest.road) nearest=candidate;
-        });
-      }catch(e){
-        console.warn("Matrix failed; trying branches individually.",e);
-      }
-
-      if(!nearest){
-        for(const b of branches){
-          try{
-            const r=await routeOneBranch(b,loc,false);
-            if(!nearest || r.road<nearest.road) nearest=r;
-          }catch(e){}
-          await new Promise(r=>setTimeout(r,180));
+      // Calculate each branch individually. This is slower than a matrix request,
+      // but it uses one stable API contract and avoids matrix-format differences.
+      for(const b of branches){
+        try{
+          const r=await routeOneBranch(b,loc,false);
+          if(!nearest || r.road<nearest.road) nearest=r;
+        }catch(e){
+          console.warn("Branch route failed:",b.name,e);
         }
+        await new Promise(r=>setTimeout(r,120));
       }
 
       if(!nearest) throw new Error("NO_ROUTE");
@@ -598,7 +525,6 @@ async function calculateDelivery(){
     }
 
     const fee=calcFeeByBillingDistance(nearest.road);
-    if(fee===null) throw new Error("BAD_PRICING");
 
     currentResult={
       loc,
@@ -643,7 +569,7 @@ async function calculateDelivery(){
   }catch(e){
     console.error(e);
     $("calcError").style.color="var(--danger)";
-    $("calcError").textContent="تعذر حساب الطريق من الخادم. تأكد من صحة الـLocation ثم اضغط احسب التوصيل مرة أخرى.";
+    $("calcError").textContent="تعذر حساب الطريق من الخادم حاليًا. تأكد من صحة الـLocation ثم اضغط احسب التوصيل مرة أخرى.";
   }
 }
 
