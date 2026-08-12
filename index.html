@@ -239,6 +239,10 @@ const DEFAULT_BRANCHES=[
 ];
 let branches=JSON.parse(localStorage.getItem("abdeen_branches")||"null")||DEFAULT_BRANCHES;
 let pricing=JSON.parse(localStorage.getItem("abdeen_pricing")||"null")||{baseKm:5,baseFee:15,extraFee:7,rounding:"ceil"};
+pricing.baseKm=Number.isFinite(Number(pricing.baseKm))&&Number(pricing.baseKm)>0?Number(pricing.baseKm):5;
+pricing.baseFee=Number.isFinite(Number(pricing.baseFee))&&Number(pricing.baseFee)>=0?Number(pricing.baseFee):15;
+pricing.extraFee=Number.isFinite(Number(pricing.extraFee))&&Number(pricing.extraFee)>=0?Number(pricing.extraFee):7;
+pricing.rounding=pricing.rounding||"ceil";
 let history=JSON.parse(localStorage.getItem("abdeen_history")||"[]");
 let currentResult=null;
 
@@ -283,10 +287,15 @@ function getBillingDistance(distance){
   return distance;
 }
 function calcFeeByBillingDistance(distance){
-  const d=getBillingDistance(distance);
-  return d<=pricing.baseKm
-    ?pricing.baseFee
-    :pricing.baseFee + ((d-pricing.baseKm)*pricing.extraFee);
+  const km=Number(distance);
+  if(!Number.isFinite(km) || km<0) return null;
+  const d=getBillingDistance(km);
+  const baseKm=Number(pricing.baseKm);
+  const baseFee=Number(pricing.baseFee);
+  const extraFee=Number(pricing.extraFee);
+  return d<=baseKm
+    ?baseFee
+    :baseFee + ((d-baseKm)*extraFee);
 }
 
 function calcFee(km){
@@ -415,23 +424,29 @@ function routePayload(branch,loc,shapeFormat="no_shape"){
 }
 
 async function routeOneBranch(branch,loc,withShape=false){
-  try{
-    const data=await valhallaRequest("/route",routePayload(branch,loc,withShape?"polyline6":"no_shape"));
-    const summary=data?.trip?.summary;
-    if(!summary || summary.length==null) throw new Error("VALHALLA_NO_ROUTE");
+  const data=await valhallaRequest("/route",routePayload(branch,loc,withShape?"polyline6":"no_shape"));
+
+  // Backend returns a normalized OSRM fallback object when Valhalla is unavailable.
+  if(data?._fallback){
     return {
-      ...branch,
-      road:+summary.length,
-      duration:summary.time!=null?+summary.time/60:null,
-      shape:withShape && data?.trip?.legs?.[0]?.shape
-        ?decodePolyline(data.trip.legs[0].shape,6):[],
-      fallbackRouter:false,
-      routerName:"Valhalla Motorcycle"
+      ...data._fallback,
+      fallbackRouter:true,
+      routerName:data._fallback.routerName||"OSRM"
     };
-  }catch(e){
-    console.warn("Valhalla unavailable; switching to FOSSGIS OSRM.",e);
-    return await osrmFallback(branch,loc,withShape);
   }
+
+  const summary=data?.trip?.summary;
+  if(!summary || summary.length==null) throw new Error("NO_ROUTE");
+
+  return {
+    ...branch,
+    road:+summary.length,
+    duration:summary.time!=null?+summary.time/60:null,
+    shape:withShape && data?.trip?.legs?.[0]?.shape
+      ?decodePolyline(data.trip.legs[0].shape,6):[],
+    fallbackRouter:false,
+    routerName:"Valhalla Motorcycle"
+  };
 }
 
 async function calculateAllBranchFees(){
@@ -463,7 +478,8 @@ async function calculateAllBranchFees(){
       results.push({
         ...b,
         road:+item.distance,
-        duration:item.time!=null?+item.time/60:null
+        duration:item.time!=null?+item.time/60:null,
+        routerName:item.routerName||"Valhalla Motorcycle"
       });
     });
   }catch(e){
@@ -552,7 +568,7 @@ async function calculateDelivery(){
           if(item?.to_index!==0 || item.distance==null || item.from_index==null) return;
           const b=branches[item.from_index];
           if(!b) return;
-          const candidate={...b,road:+item.distance,duration:item.time!=null?+item.time/60:null};
+          const candidate={...b,road:+item.distance,duration:item.time!=null?+item.time/60:null,routerName:item.routerName||"Valhalla Motorcycle"};
           if(!nearest || candidate.road<nearest.road) nearest=candidate;
         });
       }catch(e){
@@ -582,6 +598,7 @@ async function calculateDelivery(){
     }
 
     const fee=calcFeeByBillingDistance(nearest.road);
+    if(fee===null) throw new Error("BAD_PRICING");
 
     currentResult={
       loc,
