@@ -341,7 +341,14 @@ body{background:#f7f9f8;color:var(--ink);font-family:Tajawal,Arial,sans-serif}
 </div>
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+const SUPABASE_URL="https://kjpfzlxceohwajnttusn.supabase.co";
+const SUPABASE_PUBLISHABLE_KEY="sb_publishable_XJoUEUPXsf64I3Fil_rbFA_uPZENNn8";
+const supabaseClient=supabase.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);
+let dbReady=false;
+let dbInitializing=false;
+
 const DEFAULT_BRANCHES=[
 {name:"المساحة – الجيزة",lat:30.014422,lng:31.196615,hoursType:"08-02",open:"08:00",close:"02:00"},
 {name:"خاتم المرسلين – الجيزة",lat:30.005105,lng:31.203651,hoursType:"08-02",open:"08:00",close:"02:00"},
@@ -354,9 +361,10 @@ const DEFAULT_BRANCHES=[
 {name:"جنينة مول – القاهرة",lat:30.062178,lng:31.333742,hoursType:"08-02",open:"08:00",close:"02:00"},
 {name:"هليوبوليس – القاهرة",lat:30.108191,lng:31.337234,hoursType:"08-02",open:"08:00",close:"02:00"}
 ];
-let branches=JSON.parse(localStorage.getItem("abdeen_branches")||"null")||DEFAULT_BRANCHES;
-let pricing=JSON.parse(localStorage.getItem("abdeen_pricing")||"null")||{baseKm:5,baseFee:15,extraFee:7,rounding:"ceil"};
-let history=JSON.parse(localStorage.getItem("abdeen_history")||"[]");
+let branches=[];
+let pricing={baseKm:5,baseFee:15,extraFee:7,rounding:"ceil"};
+let history=[];
+let systemSettings={systemName:"ABDEEN DELIVERY",companyName:"صيدليات عابدين"};
 let currentResult=null;
 let allBranchResults=[];
 let routeOptions=[];
@@ -898,25 +906,51 @@ function openGoogleDirections(){
  window.open(url,"_blank","noopener");
 }
 
-function saveCurrent(){
+async function saveCurrent(){
  if(!currentResult)return;
- history.unshift({id:Date.now(),date:new Date().toLocaleString("ar-EG"),branch:currentResult.branch.name,lat:currentResult.loc.lat,lng:currentResult.loc.lng,km:currentResult.road,fee:currentResult.fee});
- localStorage.setItem("abdeen_history",JSON.stringify(history));toast("تم حفظ العملية");renderAll();
+ const row={id:Date.now(),operation_date:new Date().toISOString(),branch_name:currentResult.branch.name,latitude:currentResult.loc.lat,longitude:currentResult.loc.lng,distance_km:currentResult.road,delivery_fee:currentResult.fee};
+ const {data,error}=await supabaseClient.from("delivery_history").insert(row).select().single();
+ if(error){console.error(error);toast("فشل حفظ العملية في قاعدة البيانات");return;}
+ history.unshift({id:data.id,date:new Date(data.operation_date).toLocaleString("ar-EG"),branch:data.branch_name,lat:data.latitude,lng:data.longitude,km:Number(data.distance_km),fee:Number(data.delivery_fee)});
+ toast("تم حفظ العملية في SQL");renderAll();
 }
 function clearCalc(){ $("locationInput").value="";$("resultData").classList.add("hidden");$("resultEmpty").classList.remove("hidden");$("calcError").textContent="";currentResult=null;allBranchResults=[];routeOptions=[];selectedRouteIndex=0;populateBranchSelect();$("routeOptionsList").innerHTML="";}
-function savePricing(){
+async function savePricing(){
  pricing={baseKm:+$("baseKm").value,baseFee:+$("baseFee").value,extraFee:+$("extraFee").value,rounding:$("rounding").value};
- localStorage.setItem("abdeen_pricing",JSON.stringify(pricing));$("pricingMsg").textContent="تم الحفظ ✓";setTimeout(()=>$("pricingMsg").textContent="",2500);toast("تم تحديث أسعار التوصيل");
+ const {data:existing}=await supabaseClient.from("delivery_pricing").select("id").limit(1).maybeSingle();
+ let result;
+ if(existing?.id){ result=await supabaseClient.from("delivery_pricing").update({base_km:pricing.baseKm,base_fee:pricing.baseFee,extra_fee:pricing.extraFee,rounding:pricing.rounding}).eq("id",existing.id); }
+ else { result=await supabaseClient.from("delivery_pricing").insert({base_km:pricing.baseKm,base_fee:pricing.baseFee,extra_fee:pricing.extraFee,rounding:pricing.rounding}); }
+ if(result.error){console.error(result.error);toast("فشل حفظ الأسعار في قاعدة البيانات");return;}
+ $("pricingMsg").textContent="تم الحفظ ✓";setTimeout(()=>$("pricingMsg").textContent="",2500);toast("تم تحديث أسعار التوصيل");
 }
 function openBranchModal(){$("branchModal").classList.add("show")}
 function closeBranchModal(){$("branchModal").classList.remove("show")}
-function addBranch(){
+async function addBranch(){
  let name=$("bName").value.trim(),lat=+$("bLat").value,lng=+$("bLng").value;
  if(!name||!isFinite(lat)||!isFinite(lng)){toast("أكمل بيانات الفرع");return}
- branches.push({name,lat,lng,hoursType:"08-02",open:"08:00",close:"02:00"});localStorage.setItem("abdeen_branches",JSON.stringify(branches));closeBranchModal();$("bName").value=$("bLat").value=$("bLng").value="";renderAll();toast("تمت إضافة الفرع");
+ const payload={name,latitude:lat,longitude:lng,hours_type:"08-02",open_time:"08:00",close_time:"02:00"};
+ const {data,error}=await supabaseClient.from("branches").insert(payload).select().single();
+ if(error){console.error(error);toast("فشل إضافة الفرع");return;}
+ branches.push({id:data.id,name:data.name,lat:data.latitude,lng:data.longitude,hoursType:data.hours_type,open:String(data.open_time).slice(0,5),close:String(data.close_time).slice(0,5)});
+ closeBranchModal();$("bName").value=$("bLat").value=$("bLng").value="";renderAll();toast("تمت إضافة الفرع");
 }
-function deleteBranch(i){if(confirm("حذف هذا الفرع؟")){branches.splice(i,1);localStorage.setItem("abdeen_branches",JSON.stringify(branches));renderAll()}}
-function saveSettings(){localStorage.setItem("abdeen_sysName",$("sysName").value);localStorage.setItem("abdeen_company",$("companyName").value);toast("تم حفظ الإعدادات ومفتاح الخرائط")}
+async function deleteBranch(i){
+ if(!confirm("حذف هذا الفرع؟"))return;
+ const b=branches[i];
+ const {error}=await supabaseClient.from("branches").delete().eq("id",b.id);
+ if(error){console.error(error);toast("فشل حذف الفرع");return;}
+ branches.splice(i,1);renderAll();toast("تم حذف الفرع");
+}
+async function saveSettings(){
+ const systemName=$("sysName").value.trim(),companyName=$("companyName").value.trim();
+ const {data:existing}=await supabaseClient.from("system_settings").select("id").limit(1).maybeSingle();
+ let result;
+ if(existing?.id) result=await supabaseClient.from("system_settings").update({system_name:systemName,company_name:companyName}).eq("id",existing.id);
+ else result=await supabaseClient.from("system_settings").insert({system_name:systemName,company_name:companyName});
+ if(result.error){console.error(result.error);toast("فشل حفظ الإعدادات");return;}
+ systemSettings={systemName,companyName};toast("تم حفظ الإعدادات في SQL");
+}
 
 function normalizeBranchHours(){branches.forEach(b=>{if(!b.hoursType){b.hoursType="08-02";b.open="08:00";b.close="02:00";}});}
 function cairoNow(){return new Date(new Date().toLocaleString("en-US",{timeZone:"Africa/Cairo"}));}
@@ -925,8 +959,19 @@ function branchHoursLabel(b){if(b.hoursType==="24") return "24 ساعة"; return
 function isBranchOpen(b,now=cairoNow()){if(b.hoursType==="24")return true;const cur=now.getHours()*60+now.getMinutes();const op=minutesOf(b.open||"08:00"),cl=minutesOf(b.close||"02:00");if(op===cl)return true;if(cl>op)return cur>=op&&cur<cl;return cur>=op||cur<cl;}
 function branchScheduleValue(b){return b.hoursType||"08-02";}
 function scheduleSelect(i){const b=branches[i];return `<select onchange="changeBranchSchedule(${i},this.value)"><option value="24" ${branchScheduleValue(b)==="24"?"selected":""}>24 ساعة</option><option value="08-00" ${branchScheduleValue(b)==="08-00"?"selected":""}>08:00 – 00:00</option><option value="08-02" ${branchScheduleValue(b)==="08-02"?"selected":""}>08:00 – 02:00</option><option value="08-03" ${branchScheduleValue(b)==="08-03"?"selected":""}>08:00 – 03:00</option><option value="custom" ${branchScheduleValue(b)==="custom"?"selected":""}>مخصص</option></select>`;}
-function changeBranchSchedule(i,type){const b=branches[i];b.hoursType=type;if(type==="24"){b.open="00:00";b.close="00:00";}else if(type==="08-00"){b.open="08:00";b.close="00:00";}else if(type==="08-02"){b.open="08:00";b.close="02:00";}else if(type==="08-03"){b.open="08:00";b.close="03:00";}else if(type==="custom"){b.open=b.open||"08:00";b.close=b.close||"02:00";}localStorage.setItem("abdeen_branches",JSON.stringify(branches));renderBranches();renderDashboard();populateBranchSelect();toast("تم تحديث ساعات الفرع");}
-function saveCustomHours(i){const op=$("op"+i)?.value||"08:00",cl=$("cl"+i)?.value||"02:00";branches[i].hoursType="custom";branches[i].open=op;branches[i].close=cl;localStorage.setItem("abdeen_branches",JSON.stringify(branches));renderBranches();renderDashboard();populateBranchSelect();toast("تم حفظ ساعات العمل");}
+async function changeBranchSchedule(i,type){
+ const b=branches[i];b.hoursType=type;
+ if(type==="24"){b.open="00:00";b.close="00:00";}else if(type==="08-00"){b.open="08:00";b.close="00:00";}else if(type==="08-02"){b.open="08:00";b.close="02:00";}else if(type==="08-03"){b.open="08:00";b.close="03:00";}else if(type==="custom"){b.open=b.open||"08:00";b.close=b.close||"02:00";}
+ const {error}=await supabaseClient.from("branches").update({hours_type:b.hoursType,open_time:b.open,close_time:b.close}).eq("id",b.id);
+ if(error){console.error(error);toast("فشل تحديث ساعات الفرع");return;}
+ renderBranches();renderDashboard();populateBranchSelect();toast("تم تحديث ساعات الفرع");
+}
+async function saveCustomHours(i){
+ const op=$("op"+i)?.value||"08:00",cl=$("cl"+i)?.value||"02:00";const b=branches[i];b.hoursType="custom";b.open=op;b.close=cl;
+ const {error}=await supabaseClient.from("branches").update({hours_type:"custom",open_time:op,close_time:cl}).eq("id",b.id);
+ if(error){console.error(error);toast("فشل حفظ ساعات العمل");return;}
+ renderBranches();renderDashboard();populateBranchSelect();toast("تم حفظ ساعات العمل");
+}
 function renderDashboard(){normalizeBranchHours();const now=cairoNow();const clock=$("cairoClock");if(clock)clock.textContent=now.toLocaleTimeString("ar-EG",{hour:"2-digit",minute:"2-digit",hour12:true});const open=branches.filter(b=>isBranchOpen(b,now));if($("openBranchCount"))$("openBranchCount").textContent=open.length;if($("closedBranchCount"))$("closedBranchCount").textContent=branches.length-open.length;if($("allBranchCount"))$("allBranchCount").textContent=branches.length;const grid=$("availableBranchesGrid");if(!grid)return;grid.innerHTML=open.length?open.sort((a,b)=>a.name.localeCompare(b.name,"ar")).map(b=>`<div class="available-branch"><div class="branch-icon"><i class="fa-solid fa-store"></i></div><div><strong>${b.name}</strong><small><i class="fa-regular fa-clock"></i> ${branchHoursLabel(b)}</small></div><span class="open-badge">متاح للتوصيل</span></div>`).join(""):'<div class="branch-empty" style="grid-column:1/-1"><i class="fa-regular fa-clock"></i><strong>لا توجد فروع مفتوحة الآن</strong><span>راجع ساعات العمل من صفحة الفروع.</span></div>';}
 function renderBranches(){
  normalizeBranchHours();
@@ -951,7 +996,50 @@ function renderStats(){
 }
 function renderPricing(){$("baseKm").value=pricing.baseKm;$("baseFee").value=pricing.baseFee;$("extraFee").value=pricing.extraFee;$("rounding").value=pricing.rounding}
 function renderAll(){normalizeBranchHours();renderStats();renderBranches();renderPricing();populateBranchSelect();toggleBranchSelect();renderDashboard();}
+
+async function initDatabase(){
+ if(dbInitializing||dbReady)return;dbInitializing=true;
+ try{
+   const [{data:dbBranches,error:bErr},{data:priceRows,error:pErr},{data:histRows,error:hErr},{data:settingsRows,error:sErr}]=await Promise.all([
+     supabaseClient.from("branches").select("id,name,latitude,longitude,hours_type,open_time,close_time").order("id"),
+     supabaseClient.from("delivery_pricing").select("id,base_km,base_fee,extra_fee,rounding").order("id").limit(1),
+     supabaseClient.from("delivery_history").select("id,operation_date,branch_name,latitude,longitude,distance_km,delivery_fee").order("operation_date",{ascending:false}),
+     supabaseClient.from("system_settings").select("id,system_name,company_name").order("id").limit(1)
+   ]);
+   if(bErr)throw bErr;if(pErr)throw pErr;if(hErr)throw hErr;if(sErr)throw sErr;
+
+   if((dbBranches||[]).length===0){
+     const localBranches=JSON.parse(localStorage.getItem("abdeen_branches")||"null")||DEFAULT_BRANCHES;
+     const payload=localBranches.map(b=>({name:b.name,latitude:b.lat,longitude:b.lng,hours_type:b.hoursType||"08-02",open_time:b.open||"08:00",close_time:b.close||"02:00"}));
+     const {data:seeded,error}=await supabaseClient.from("branches").insert(payload).select();
+     if(error)throw error;
+     branches=(seeded||[]).map(b=>({id:b.id,name:b.name,lat:b.latitude,lng:b.longitude,hoursType:b.hours_type,open:String(b.open_time).slice(0,5),close:String(b.close_time).slice(0,5)}));
+   }else branches=(dbBranches||[]).map(b=>({id:b.id,name:b.name,lat:b.latitude,lng:b.longitude,hoursType:b.hours_type,open:String(b.open_time).slice(0,5),close:String(b.close_time).slice(0,5)}));
+
+   if(priceRows?.[0]){const p=priceRows[0];pricing={baseKm:Number(p.base_km),baseFee:Number(p.base_fee),extraFee:Number(p.extra_fee),rounding:p.rounding};}
+   else {const localPricing=JSON.parse(localStorage.getItem("abdeen_pricing")||"null")||pricing;pricing=localPricing;await supabaseClient.from("delivery_pricing").insert({base_km:pricing.baseKm,base_fee:pricing.baseFee,extra_fee:pricing.extraFee,rounding:pricing.rounding});}
+
+   history=(histRows||[]).map(x=>({id:x.id,date:new Date(x.operation_date).toLocaleString("ar-EG"),branch:x.branch_name,lat:x.latitude,lng:x.longitude,km:Number(x.distance_km||0),fee:Number(x.delivery_fee||0)}));
+   if((histRows||[]).length===0){
+     const localHistory=JSON.parse(localStorage.getItem("abdeen_history")||"[]");
+     if(localHistory.length){
+       const payload=localHistory.map(x=>({id:Number(x.id)||Date.now(),operation_date:new Date().toISOString(),branch_name:x.branch,latitude:x.lat,longitude:x.lng,distance_km:x.km,delivery_fee:x.fee}));
+       const {error}=await supabaseClient.from("delivery_history").upsert(payload,{onConflict:"id"});
+       if(!error)history=localHistory;
+     }
+   }
+
+   if(settingsRows?.[0]){systemSettings={systemName:settingsRows[0].system_name||"ABDEEN DELIVERY",companyName:settingsRows[0].company_name||"صيدليات عابدين"};}
+   else {const localSystem={systemName:$("sysName")?.value||"ABDEEN DELIVERY",companyName:$("companyName")?.value||"صيدليات عابدين"};systemSettings=localSystem;await supabaseClient.from("system_settings").insert({system_name:localSystem.systemName,company_name:localSystem.companyName});}
+   if($("sysName"))$("sysName").value=systemSettings.systemName;
+   if($("companyName"))$("companyName").value=systemSettings.companyName;
+   dbReady=true;renderAll();toast("تم الاتصال بقاعدة SQL");
+ }catch(e){console.error("Supabase init error",e);toast("تعذر الاتصال بقاعدة البيانات");renderAll();}
+ finally{dbInitializing=false;}
+}
+
 renderAll();
+initDatabase();
 setInterval(renderDashboard,60000);
 </script>
 </body>
